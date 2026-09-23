@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>مدير مجموعات واتساب - الحذف الجماعي الذكي</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-icon">
+          <i class="fa-brands fa-whatsapp"></i>
+        </div>
+        <div>
+          <h1>مدير مجموعات واتساب <span class="badge-pro">Bulk Remover Pro</span></h1>
+          <p class="subtitle">حذف أعضاء مجموعات واتساب دفعة واحدة من ملف الإكسيل بأمان وبدون حظر</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div id="connectionStatusBadge" class="status-badge disconnected">
+          <span class="pulse-dot"></span>
+          <span id="connectionStatusText">غير متصل</span>
+        </div>
+        <button id="logoutBtn" class="btn btn-secondary btn-sm" style="display: none;">
+          <i class="fa-solid fa-arrow-right-from-bracket"></i> تسجيل الخروج
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Stepper / Workflow -->
+    <div class="stepper-nav">
+      <div class="step-item active" data-step="1">
+        <div class="step-number">1</div>
+        <div class="step-label">ربط واتساب</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-item" data-step="2">
+        <div class="step-number">2</div>
+        <div class="step-label">رفع ملف الإكسيل</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-item" data-step="3">
+        <div class="step-number">3</div>
+        <div class="step-label">تحديد الجروبات</div>
+      </div>
+      <div class="step-line"></div>
+      <div class="step-item" data-step="4">
+        <div class="step-number">4</div>
+        <div class="step-label">المعاينة والحذف الآمن</div>
+      </div>
+    </div>
+
+    <!-- Step 1: WhatsApp Connect & QR Code -->
+    <section id="step1" class="step-section active">
+      <div class="card glass-card">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-qrcode text-accent"></i> الخطوة الأولى: ربط حساب واتساب</h2>
+          <p>امسح رمز QR من هاتفك عبر فتح تطبيق واتساب > الأجهزة المرتبطة > ربط جهاز</p>
+        </div>
+        <div class="card-body connection-area">
+          <div id="qrContainer" class="qr-box">
+            <div id="qrLoading" class="loading-state">
+              <div class="spinner"></div>
+              <p>جاري توليد رمز الاستجابة السريعة (QR Code)...</p>
+            </div>
+            <img id="qrImage" src="" alt="QR Code" style="display: none;">
+          </div>
+          
+          <div id="connectedCard" class="connected-info" style="display: none;">
+            <div class="connected-icon">
+              <i class="fa-solid fa-circle-check"></i>
+            </div>
+            <h3 id="connectedUserName">متصل بنجاح!</h3>
+            <p id="connectedUserPhone" class="phone-display"></p>
+            <div class="alert alert-success">
+              <i class="fa-solid fa-shield-halved"></i> الجلسة محفوظة بأمان على جهازك. يمكنك الآن الانتقال للخطوة التالية.
+            </div>
+            <button id="toStep2Btn" class="btn btn-primary btn-lg">
+              الانتقال لرفع ملف الإكسيل <i class="fa-solid fa-arrow-left"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 2: Input Numbers / Select Members -->
+    <section id="step2" class="step-section">
+      <div class="card glass-card">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-list-check text-accent"></i> الخطوة الثانية: تحديد أرقام وأسماء الأشخاص المستهدفين</h2>
+          <p>اختر الطريقة الأنسب لك لإدخال الأرقام (ملف إكسيل، نسخ ولصق نص، استخراج من صورة، أو التحديد المباشر من أعضاء المجموعات)</p>
+        </div>
+        <div class="card-body">
+          <!-- Input Method Tabs -->
+          <div class="tabs-nav">
+            <button class="tab-btn active" data-tab="tab-excel">
+              <i class="fa-solid fa-file-excel"></i> ملف إكسيل (Excel)
+            </button>
+            <button class="tab-btn" data-tab="tab-paste">
+              <i class="fa-solid fa-paste"></i> نسخ ولصق أرقام (Paste)
+            </button>
+            <button class="tab-btn" data-tab="tab-ocr">
+              <i class="fa-solid fa-image"></i> استخراج من صورة (OCR)
+            </button>
+            <button class="tab-btn" data-tab="tab-direct">
+              <i class="fa-solid fa-users-viewfinder"></i> بدون أرقام (تحديد يدوي)
+            </button>
+          </div>
+
+          <!-- TAB 1: EXCEL -->
+          <div id="tab-excel" class="tab-content active">
+            <div id="dropZone" class="drop-zone">
+              <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" hidden>
+              <div id="dropZoneContent" class="drop-zone-content">
+                <i class="fa-solid fa-cloud-arrow-up drop-icon"></i>
+                <h3>اسحب وأفلت ملف الإكسيل هنا</h3>
+                <p>أو <span class="browse-link">تصفح من جهازك</span> (يدعم .xlsx, .xls, .csv)</p>
+              </div>
+              <div id="dropZoneLoading" class="loading-state" style="display: none; padding: 20px;">
+                <div class="spinner"></div>
+                <p style="color: var(--text-primary); margin-top: 10px;">جاري قراءة وتحليل ملف الإكسيل...</p>
+              </div>
+            </div>
+
+            <!-- File Processed Details -->
+            <div id="fileSummaryCard" class="file-summary-card" style="display: none;">
+              <div class="file-meta">
+                <div class="file-info-header">
+                  <i class="fa-solid fa-file-circle-check text-success fa-2x"></i>
+                  <div>
+                    <h4 id="fileName">بيانات.xlsx</h4>
+                    <span id="fileRowsCount" class="badge">0 رقم</span>
+                  </div>
+                </div>
+                <button id="changeFileBtn" class="btn btn-outline btn-sm">
+                  <i class="fa-solid fa-rotate-right"></i> تغيير الملف
+                </button>
+              </div>
+
+              <!-- Column Mapping -->
+              <div class="column-mapping-box">
+                <h3><i class="fa-solid fa-sliders"></i> مطابقة الأعمدة:</h3>
+                <div class="mapping-grid">
+                  <div class="form-group">
+                    <label for="phoneColumnSelect">عمود رقم الهاتف (مطلوب):</label>
+                    <select id="phoneColumnSelect" class="form-control"></select>
+                  </div>
+                  <div class="form-group">
+                    <label for="nameColumnSelect">عمود اسم العضو (اختياري):</label>
+                    <select id="nameColumnSelect" class="form-control"></select>
+                  </div>
+                  <div class="form-group">
+                    <label for="defaultCountryCode">كود الدولة التلقائي:</label>
+                    <input type="text" id="defaultCountryCode" class="form-control" value="20" placeholder="20">
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 2: COPY-PASTE TEXT -->
+          <div id="tab-paste" class="tab-content">
+            <div class="manual-input-box">
+              <label for="pastedNumbersText" class="font-bold">الصق النص أو قائمة الأرقام والأسماء هنا:</label>
+              <p class="subtitle" style="margin-bottom: 8px;">يمكنك لصق أرقام مفصولة بأسطر، فواصل، أو نصوص عشوائية تحتوي على أرقام هواتف وسيقوم النظام باستخراجها وتنسيقها تلقائياً.</p>
+              <textarea id="pastedNumbersText" class="form-control text-area-large" placeholder="مثال:&#10;01012345678 - أحمد&#10;+201123456789 - سارة&#10;966501234567&#10;أو أي نص يحتوي على أرقام هواتف..."></textarea>
+              <div class="manual-actions-row">
+                <button id="extractPastedBtn" class="btn btn-primary">
+                  <i class="fa-solid fa-wand-magic-sparkles"></i> استخراج وتجهيز الأرقام من النص
+                </button>
+                <button id="clearPastedBtn" class="btn btn-secondary btn-sm">مسح النص</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 3: IMAGE OCR -->
+          <div id="tab-ocr" class="tab-content">
+            <div class="ocr-input-box">
+              <div id="ocrDropZone" class="drop-zone">
+                <input type="file" id="ocrFileInput" accept="image/*" hidden>
+                <div id="ocrDropZoneContent" class="drop-zone-content">
+                  <i class="fa-solid fa-camera-retro drop-icon"></i>
+                  <h3>ارفع صورة أو لقطة شاشة تحتوي على أرقام</h3>
+                  <p>أو اضغط <span class="browse-link">تصفح صورة</span> أو استخدم <strong>Ctrl+V</strong> للصق لقطة الشاشة مباشرة!</p>
+                </div>
+                <div id="ocrLoading" class="loading-state" style="display: none; padding: 20px;">
+                  <div class="spinner"></div>
+                  <p id="ocrProgressStatus" style="color: var(--text-primary); margin-top: 10px;">جاري التعرف على النصوص والأرقام من الصورة...</p>
+                </div>
+              </div>
+              <div id="ocrPreviewContainer" style="display: none; margin-top: 16px;">
+                <img id="ocrPreviewImg" src="" alt="OCR Preview" style="max-height: 180px; border-radius: 8px; border: 1px solid var(--card-border);">
+              </div>
+            </div>
+          </div>
+
+          <!-- TAB 4: DIRECT SELECTION -->
+          <div id="tab-direct" class="tab-content">
+            <div class="direct-selection-info-box">
+              <div class="info-icon"><i class="fa-solid fa-users-gear text-accent fa-3x"></i></div>
+              <div>
+                <h3>التحديد اليدوي المباشر من أعضاء الجروب</h3>
+                <p>إذا لم يكن لديك ملف إكسيل أو أرقام جاهزة وترغب في تصفح أعضاء الجروب واختيار من تريد حذفه بنفسك، يمكنك المتابعة مباشرة دون إدخال أرقام وسيقوم التطبيق بعرض قائمة أعضاء المجموعة في الخطوة الرابعة لتحدد من تريد حذفه بنقرة زر واحدة.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Common Preview of Records (if any) -->
+          <div id="commonRecordsPreview" class="records-preview" style="display: none; margin-top: 24px;">
+            <div class="section-title-row">
+              <h4>الأرقام المجهزة حتى الآن:</h4>
+              <span id="validNumbersCount" class="text-success font-bold"></span>
+            </div>
+            <div class="table-responsive max-h-350">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>الاسم</th>
+                    <th>الرقم الأصلي</th>
+                    <th>الرقم الدولي المنظف</th>
+                    <th>الحالة</th>
+                  </tr>
+                </thead>
+                <tbody id="excelPreviewTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="action-footer">
+            <button id="backToStep1Btn" class="btn btn-secondary">
+              <i class="fa-solid fa-arrow-right"></i> رجوع
+            </button>
+            <button id="toStep3Btn" class="btn btn-primary btn-lg">
+              تأكيد ومتابعة لاختيار الجروبات <i class="fa-solid fa-arrow-left"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 3: Select WhatsApp Groups -->
+    <section id="step3" class="step-section">
+      <div class="card glass-card">
+        <div class="card-header">
+          <div class="header-split">
+            <div>
+              <h2><i class="fa-solid fa-users-line text-accent"></i> الخطوة الثالثة: تحديد مجموعات واتساب المستهدفة</h2>
+              <p>يتم تلقائياً تظليل المجموعات التي تمتلك فيها صلاحية <strong>مشرف (Admin)</strong> فقط لتتمكن من الحذف</p>
+            </div>
+            <button id="refreshGroupsBtn" class="btn btn-secondary btn-sm">
+              <i class="fa-solid fa-arrows-rotate"></i> تحديث المجموعات
+            </button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="groups-toolbar">
+            <div class="search-box">
+              <i class="fa-solid fa-magnifying-glass"></i>
+              <input type="text" id="groupSearchInput" placeholder="ابحث باسم المجموعة...">
+            </div>
+            <div class="filter-options">
+              <label class="checkbox-container">
+                <input type="checkbox" id="adminOnlyFilter" checked>
+                <span class="checkmark"></span>
+                المجموعات التي أنا مشرف (Admin) فيها فقط
+              </label>
+              <button id="selectAllGroupsBtn" class="btn btn-outline btn-sm">تحديد الكل</button>
+              <button id="deselectAllGroupsBtn" class="btn btn-outline btn-sm">إلغاء التحديد</button>
+            </div>
+          </div>
+
+          <div id="groupsLoading" class="loading-state" style="display: none;">
+            <div class="spinner"></div>
+            <p>جاري جلب قائمة المجموعات والأعضاء من واتساب...</p>
+          </div>
+
+          <div id="groupsGrid" class="groups-grid"></div>
+
+          <div class="selected-groups-bar">
+            <span>تم تحديد: <strong id="selectedGroupsCount" class="text-accent">0</strong> مجموعة</span>
+            <div class="action-footer">
+              <button id="backToStep2Btn" class="btn btn-secondary">
+                <i class="fa-solid fa-arrow-right"></i> رجوع
+              </button>
+              <button id="toStep4Btn" class="btn btn-primary btn-lg" disabled>
+                متابعة للمعاينة والمطابقة <i class="fa-solid fa-arrow-left"></i>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Step 4: Preview Matches & Safe Removal -->
+    <section id="step4" class="step-section">
+      <div class="card glass-card">
+        <div class="card-header">
+          <h2><i class="fa-solid fa-user-xmark text-danger"></i> الخطوة الرابعة: مراجعة المطابقة وبدء الحذف الآمن</h2>
+          <p>قارن أرقام الإكسيل مع أعضاء الجروبات المحددة وابدأ عملية الإزالة بأمان</p>
+        </div>
+        <div class="card-body">
+          <!-- Matching Stats -->
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-icon icon-blue"><i class="fa-solid fa-file-lines"></i></div>
+              <div class="stat-data">
+                <span class="stat-number" id="statExcelTotal">0</span>
+                <span class="stat-label">أرقام في الإكسيل</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon icon-green"><i class="fa-solid fa-users"></i></div>
+              <div class="stat-data">
+                <span class="stat-number" id="statSelectedGroupsCount">0</span>
+                <span class="stat-label">المجموعات المحددة</span>
+              </div>
+            </div>
+            <div class="stat-card highlight-danger">
+              <div class="stat-icon icon-red"><i class="fa-solid fa-user-minus"></i></div>
+              <div class="stat-data">
+                <span class="stat-number" id="statFoundMatchesCount">0</span>
+                <span class="stat-label">عضو سيتم حذفهم (مطابقين)</span>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon icon-amber"><i class="fa-solid fa-shield-cat"></i></div>
+              <div class="stat-data">
+                <span class="stat-number" id="statAdminsProtectedCount">0</span>
+                <span class="stat-label">مشرفون (محميون من الحذف)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Anti-Ban Controls Card -->
+          <div class="anti-ban-box">
+            <div class="anti-ban-header">
+              <i class="fa-solid fa-shield-virus fa-2x text-accent"></i>
+              <div>
+                <h4>نظام الأمان والفاصل الزمني (Anti-Ban Protection)</h4>
+                <p>يتم تطبيق فاصل زمني آمن بين كل عضو والآخر مع تباين عشوائي (Random Jitter) لمنع خوارزميات واتساب من اعتبار العملية نشاطاً مشبوهاً.</p>
+              </div>
+            </div>
+            <div class="anti-ban-inputs">
+              <div class="form-group inline-group">
+                <label for="delaySeconds">الفاصل الزمني بين كل حذف:</label>
+                <div class="input-with-suffix">
+                  <input type="number" id="delaySeconds" value="4" min="2" max="30" class="form-control">
+                  <span class="suffix">ثوانٍ (+ فاصل عشوائي)</span>
+                </div>
+              </div>
+              <div class="form-group inline-group">
+                <label for="batchPauseCount">إيقاف استراحة تلقائي بعد كل:</label>
+                <div class="input-with-suffix">
+                  <input type="number" id="batchPauseCount" value="25" min="5" max="100" class="form-control">
+                  <span class="suffix">عضو (لمدة 15 ثانية)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Matching Members Table -->
+          <div class="matches-list-section">
+            <div class="section-title-row">
+              <h4>قائمة الأعضاء الذين تم العثور عليهم في المجموعات وجاهزون للحذف:</h4>
+              <div class="table-search">
+                <input type="text" id="matchSearchInput" placeholder="تصفية بالقائمة...">
+              </div>
+            </div>
+            <div class="table-responsive max-h-350">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" id="checkAllMatches" checked></th>
+                    <th>الاسم (من الإكسيل)</th>
+                    <th>رقم الهاتف</th>
+                    <th>المجموعة المتواجد بها</th>
+                    <th>الحالة الحالية</th>
+                  </tr>
+                </thead>
+                <tbody id="matchesTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Execution Controls & Live Progress -->
+          <div id="executionSection" class="execution-section">
+            <div class="progress-box" id="progressBox" style="display: none;">
+              <div class="progress-header">
+                <span class="progress-title" id="progressStatusText">جاري الحذف...</span>
+                <span class="progress-percentage" id="progressPercentage">0%</span>
+              </div>
+              <div class="progress-track">
+                <div class="progress-fill" id="progressBarFill" style="width: 0%;"></div>
+              </div>
+              <div class="progress-stats-row">
+                <span>تم بنجاح: <strong id="progressSuccessCount" class="text-success">0</strong></span>
+                <span>فشل: <strong id="progressFailedCount" class="text-danger">0</strong></span>
+                <span>متبقي: <strong id="progressRemainingCount">0</strong></span>
+              </div>
+            </div>
+
+            <!-- Live Logs Terminal -->
+            <div class="terminal-card">
+              <div class="terminal-header">
+                <div class="terminal-dots">
+                  <span class="dot dot-red"></span>
+                  <span class="dot dot-yellow"></span>
+                  <span class="dot dot-green"></span>
+                </div>
+                <span class="terminal-title">سجل العمليات المباشر (Live Removal Logs)</span>
+                <button id="clearLogsBtn" class="btn-terminal-action">مسح السجل</button>
+              </div>
+              <div class="terminal-body" id="terminalLogs">
+                <div class="log-line info">[النظام] التطبيق جاهز. حدد المجموعات والأعضاء واضغط بدء الحذف الآمن.</div>
+              </div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="removal-actions">
+              <button id="startRemovalBtn" class="btn btn-danger btn-xl">
+                <i class="fa-solid fa-trash-can"></i> بدء الحذف الجماعي الآمن
+              </button>
+              <button id="pauseRemovalBtn" class="btn btn-warning btn-lg" style="display: none;">
+                <i class="fa-solid fa-pause"></i> إيقاف مؤقت
+              </button>
+              <button id="resumeRemovalBtn" class="btn btn-success btn-lg" style="display: none;">
+                <i class="fa-solid fa-play"></i> استئناف الحذف
+              </button>
+              <button id="stopRemovalBtn" class="btn btn-secondary btn-lg" style="display: none;">
+                <i class="fa-solid fa-stop"></i> إيقاف نهائي
+              </button>
+              <button id="exportReportBtn" class="btn btn-outline btn-lg" style="display: none;">
+                <i class="fa-solid fa-file-excel"></i> تصدير تقرير النتائج
+              </button>
+            </div>
+          </div>
+
+          <div class="action-footer">
+            <button id="backToStep3Btn" class="btn btn-secondary">
+              <i class="fa-solid fa-arrow-right"></i> رجوع لاختيار الجروبات
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Confirmation Modal (In-App) -->
+    <div id="confirmModal" class="custom-modal-overlay" style="display: none;">
+      <div class="custom-modal-card">
+        <div class="modal-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+        <h3>تأكيد عملية الحذف الجماعي</h3>
+        <p id="confirmModalText">أنت على وشك حذف الأعضاء المحددين من المجموعات. هل ترغب في المتابعة؟</p>
+        <div class="modal-settings-summary">
+          <div><i class="fa-solid fa-clock"></i> الفاصل الزمني: <strong id="modalDelayText" class="text-accent">4 ثوانٍ</strong></div>
+          <div><i class="fa-solid fa-shield-halved"></i> نظام الأمان: <strong class="text-success">مفعّل</strong></div>
+        </div>
+        <div class="modal-actions">
+          <button id="confirmExecuteBtn" class="btn btn-danger btn-lg">
+            <i class="fa-solid fa-trash-can"></i> نعم، ابدأ الحذف الآمن الآن
+          </button>
+          <button id="cancelModalBtn" class="btn btn-secondary btn-lg">
+            إلغاء
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="app-footer">
+      <p>مدير مجموعات واتساب &copy; 2026 - نظام محلي آمن ومحمي 100%، جميع البيانات ورموز المصادقة تعمل محلياً على جهازك.</p>
+    </footer>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

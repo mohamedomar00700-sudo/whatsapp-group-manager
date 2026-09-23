@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# WhatsApp Private Session & Auth Credentials (CRITICAL: DO NOT COMMIT)
+auth_info_baileys/
+
+# User uploads & temp files
+uploads/
+*.log
+
+# Environment variables
+.env
+.env.local
+
+# OS generated files
+.DS_Store
+Thumbs.db

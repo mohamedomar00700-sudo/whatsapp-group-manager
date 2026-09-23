@@ -1,0 +1,19 @@
+{
+  "name": "whatsapp-group-manager",
+  "version": "1.0.0",
+  "description": "WhatsApp Bulk Group Member Remover with Excel parsing and safe anti-ban delays",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4",
+    "socket.io": "^4.8.1",
+    "xlsx": "^0.18.5"
+  }
+}
