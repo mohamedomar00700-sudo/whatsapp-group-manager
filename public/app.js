@@ -1,5 +1,32 @@
 // WhatsApp Group Manager - Frontend Logic
-const socket = io();
+
+// Each browser gets its own private session (its own WhatsApp link on the server)
+const SESSION_ID = (() => {
+  const make = () => (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, '0')).join(''));
+  try {
+    let id = localStorage.getItem('wa_session_id');
+    if (!id || !/^[a-zA-Z0-9-]{16,64}$/.test(id)) {
+      id = make();
+      localStorage.setItem('wa_session_id', id);
+    }
+    return id;
+  } catch (e) {
+    return make();
+  }
+})();
+
+// Send the session id with every API call
+const _origFetch = window.fetch.bind(window);
+window.fetch = (url, opts = {}) => {
+  if (typeof url === 'string' && url.startsWith('/api/')) {
+    const headers = new Headers(opts.headers || {});
+    headers.set('X-Session-Id', SESSION_ID);
+    opts = { ...opts, headers };
+  }
+  return _origFetch(url, opts);
+};
+
+const socket = io({ auth: { sessionId: SESSION_ID } });
 
 // State
 let appState = {
@@ -962,7 +989,7 @@ function finishRemovalUI(data) {
 }
 
 exportReportBtn.addEventListener('click', () => {
-  window.open('/api/export-results', '_blank');
+  window.open('/api/export-results?sid=' + encodeURIComponent(SESSION_ID), '_blank');
 });
 
 // Terminal Logs
