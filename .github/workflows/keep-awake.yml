@@ -1,0 +1,28 @@
+name: Keep app awake
+
+# Free Hugging Face Spaces sleep after ~48h without visits.
+# This visits the app every 6 hours so it never sleeps.
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Visit the app
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          USER=$(curl -s -H "Authorization: Bearer $HF_TOKEN" https://huggingface.co/api/whoami-v2 | python3 -c "import sys,json;print(json.load(sys.stdin)['name'])")
+          HOST=$(echo "$USER" | tr '[:upper:]' '[:lower:]' | tr '_.' '--')
+          URL="https://${HOST}-whatsapp-group-manager.hf.space/healthz"
+          echo "Pinging $URL"
+          for i in 1 2 3; do curl -s -m 60 -o /dev/null -w "%{http_code}\n" "$URL" && break; sleep 20; done
+          # If it somehow fell asleep, wake it up (never restarts a running app)
+          STAGE=$(curl -s -H "Authorization: Bearer $HF_TOKEN" "https://huggingface.co/api/spaces/${USER}/whatsapp-group-manager/runtime" | python3 -c "import sys,json;print(json.load(sys.stdin).get('stage',''))" || true)
+          echo "Space stage: $STAGE"
+          if [ "$STAGE" = "SLEEPING" ] || [ "$STAGE" = "PAUSED" ]; then
+            curl -s -X POST -H "Authorization: Bearer $HF_TOKEN" "https://huggingface.co/api/spaces/${USER}/whatsapp-group-manager/restart" -o /dev/null -w "%{http_code}\n" || true
+          fi
