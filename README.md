@@ -76,6 +76,15 @@
 
 ---
 
+## 💻 نسخة ويندوز (ملف واحد بدون تثبيت)
+
+- حمّل `WhatsAppGroupManager.exe` ودوس عليه دبل كليك، هيفتح التطبيق في المتصفح تلقائياً.
+- أول مرة لو ظهرت رسالة "Windows protected your PC": اضغط More info ثم Run anyway.
+- الجلسة والبيانات بتتحفظ على جهاز المستخدم فقط (في `%APPDATA%\WhatsAppGroupManager`).
+- لبناء الملف: `npm install` ثم `bash desktop/build-windows.sh` (يحتاج Python + pefile).
+
+---
+
 ## 🔒 الأمان والخصوصية (Privacy & Security)
 
 - جميع البيانات، وجلسات الاتصال المشفرة، وأرقام الهواتف تعمل وتُخزن **محلياً على جهازك فقط (100% Localhost)**.

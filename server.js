@@ -23,6 +23,7 @@ const app = express();
 const server = createServer(app);
 const io = new Server(server, {
   cors: { origin: '*' },
+  serveClient: !process.env.DESKTOP,
   maxHttpBufferSize: 5e6
 });
 
@@ -42,7 +43,7 @@ for (const dir of [SESSIONS_DIR, UPLOADS_DIR]) {
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(process.env.PUBLIC_DIR || path.join(__dirname, 'public')));
 
 const upload = multer({
   storage: multer.diskStorage({
@@ -714,7 +715,8 @@ app.get('/api/export-results', (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, process.env.HOST || undefined, () => {
+  if (process.env.DESKTOP) return;
   console.log(`\n======================================================`);
   console.log(`🚀 خادم تطبيق مدير مجموعات واتساب يعمل بنجاح!`);
   console.log(`🌐 افتح الرابط التالي في متصفحك: http://localhost:${PORT}`);
