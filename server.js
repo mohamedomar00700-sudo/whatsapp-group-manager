@@ -43,6 +43,14 @@ for (const dir of [SESSIONS_DIR, UPLOADS_DIR]) {
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
+// Also serve the 3 frontend files if they sit next to server.js (flat upload, e.g. from a phone)
+const FLAT_FILES = { '/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css' };
+for (const [route, file] of Object.entries(FLAT_FILES)) {
+  app.get(route, (req, res, next) => {
+    const p = path.join(__dirname, file);
+    fs.existsSync(p) ? res.sendFile(p) : next();
+  });
+}
 
 const upload = multer({
   storage: multer.diskStorage({
