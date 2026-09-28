@@ -18,3 +18,4 @@ Thumbs.db
 
 # Per-user WhatsApp sessions (multi-user mode)
 auth_sessions/
+dist/
