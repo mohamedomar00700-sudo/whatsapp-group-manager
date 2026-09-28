@@ -22,65 +22,283 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  cors: { origin: '*' },
+  maxHttpBufferSize: 5e6
 });
 
 const PORT = process.env.PORT || 3000;
-const AUTH_DIR = path.join(__dirname, 'auth_info_baileys');
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const SESSIONS_DIR = path.join(DATA_DIR, 'auth_sessions');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 
-if (!fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+// Max simultaneous active WhatsApp connections (protects server memory)
+const MAX_ACTIVE_SESSIONS = parseInt(process.env.MAX_ACTIVE_SESSIONS || '25', 10);
+// Close a WhatsApp connection after this many minutes with no open browser tab (unless a removal is running)
+const IDLE_MINUTES = parseInt(process.env.IDLE_MINUTES || '20', 10);
+
+for (const dir of [SESSIONS_DIR, UPLOADS_DIR]) {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
 
-// Configure express with 50mb limit to handle large group participant lists
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Server-side cache for groups to avoid large payloads across the wire
-let cachedGroupsList = [];
-
-// Multer storage for uploaded excel sheets
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-  filename: (req, file, cb) => cb(null, `sheet_${Date.now()}_${file.originalname}`)
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+    filename: (req, file, cb) => cb(null, `sheet_${Date.now()}_${Math.random().toString(36).slice(2)}${path.extname(file.originalname || '').slice(0, 10)}`)
+  }),
+  limits: { fileSize: 20 * 1024 * 1024 }
 });
-const upload = multer({ storage });
 
-// State variables
-let sock = null;
-let connectionStatus = 'disconnected'; // 'connecting', 'connected', 'disconnected'
-let currentQR = null;
-let currentUser = null;
-
-// Removal task state
-let activeTask = {
-  isRunning: false,
-  isPaused: false,
-  isStopped: false,
-  total: 0,
-  processed: 0,
-  successful: 0,
-  failed: 0,
-  results: []
-};
-
-// Helper sleep with jitter
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Format phone number
+// ============================================================
+// Multi-user sessions: every browser gets its own WhatsApp link
+// ============================================================
+const SESSION_ID_RE = /^[a-zA-Z0-9-]{16,64}$/;
+const sessions = new Map();
+
+function isValidSessionId(id) {
+  return typeof id === 'string' && SESSION_ID_RE.test(id);
+}
+
+function newTaskState() {
+  return { isRunning: false, isPaused: false, isStopped: false, total: 0, processed: 0, successful: 0, failed: 0, results: [] };
+}
+
+function getSession(id) {
+  let s = sessions.get(id);
+  if (!s) {
+    s = {
+      id,
+      sock: null,
+      status: 'disconnected',
+      qr: null,
+      user: null,
+      task: newTaskState(),
+      groups: [],
+      clients: 0,
+      lastSeen: Date.now(),
+      initializing: false,
+      closedByServer: false
+    };
+    sessions.set(id, s);
+  }
+  return s;
+}
+
+function activeSocketCount() {
+  let n = 0;
+  for (const s of sessions.values()) if (s.sock) n++;
+  return n;
+}
+
+function emitTo(s, event, data) {
+  io.to(s.id).emit(event, data);
+}
+
+function userPayload(user) {
+  if (!user) return null;
+  return {
+    id: user.id,
+    name: user.name || user.notify || 'حساب واتساب',
+    phone: user.id.split(':')[0].split('@')[0]
+  };
+}
+
+function closeSock(s) {
+  if (s.sock) {
+    s.closedByServer = true;
+    try { s.sock.ev.removeAllListeners(); } catch (e) {}
+    try { s.sock.end(undefined); } catch (e) {}
+    s.sock = null;
+  }
+}
+
+async function initWhatsApp(s) {
+  if (s.initializing) return;
+  if (!s.sock && activeSocketCount() >= MAX_ACTIVE_SESSIONS) {
+    emitTo(s, 'status', { status: 'disconnected', message: 'السيرفر مشغول حالياً بعدد كبير من المستخدمين، حاول بعد قليل' });
+    return;
+  }
+  s.initializing = true;
+  closeSock(s);
+  s.closedByServer = false;
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(path.join(SESSIONS_DIR, s.id));
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+      version,
+      logger: pino({ level: 'silent' }),
+      printQRInTerminal: false,
+      auth: state,
+      browser: ['WA Group Manager', 'Chrome', '1.0.0'],
+      syncFullHistory: false,
+      markOnlineOnConnect: false
+    });
+    s.sock = sock;
+    s.status = 'connecting';
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+      if (s.sock !== sock) return; // stale socket
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr) {
+        s.qr = qr;
+        s.status = 'connecting';
+        try {
+          emitTo(s, 'qr', await QRCode.toDataURL(qr, { scale: 8, margin: 1 }));
+          emitTo(s, 'status', { status: 'connecting', message: 'امسح رمز QR للاتصال' });
+        } catch (err) {
+          console.error('[QR] Error generating QR:', err);
+        }
+      }
+
+      if (connection === 'close') {
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
+        s.sock = null;
+        s.status = 'disconnected';
+        s.qr = null;
+        s.user = null;
+
+        if (s.closedByServer) return;
+
+        emitTo(s, 'status', { status: 'disconnected', message: 'تم قطع الاتصال' });
+
+        if (loggedOut) {
+          fs.rmSync(path.join(SESSIONS_DIR, s.id), { recursive: true, force: true });
+          emitTo(s, 'status', { status: 'logged_out', message: 'تم تسجيل الخروج من الهاتف' });
+          if (s.clients > 0) setTimeout(() => initWhatsApp(s), 1500);
+        } else if (s.clients > 0 || s.task.isRunning) {
+          // Only reconnect while someone is using this session
+          setTimeout(() => { if (!s.sock) initWhatsApp(s); }, 3000);
+        }
+      } else if (connection === 'open') {
+        s.status = 'connected';
+        s.qr = null;
+        s.user = sock.user;
+        console.log(`[Session ${s.id.slice(0, 8)}] connected`);
+        emitTo(s, 'status', { status: 'connected', user: userPayload(sock.user) });
+      }
+    });
+  } catch (err) {
+    console.error('[Baileys] Init error:', err);
+    s.sock = null;
+    s.status = 'disconnected';
+    emitTo(s, 'status', { status: 'disconnected', message: 'فشل في الاتصال' });
+  } finally {
+    s.initializing = false;
+  }
+}
+
+// Idle cleanup: free memory for sessions nobody is using (auth files are kept,
+// so the user reconnects without a new QR when they come back)
+setInterval(() => {
+  const now = Date.now();
+  for (const s of sessions.values()) {
+    const idle = s.clients === 0 && !s.task.isRunning && now - s.lastSeen > IDLE_MINUTES * 60 * 1000;
+    if (idle) {
+      closeSock(s);
+      sessions.delete(s.id);
+    }
+  }
+  // Delete uploaded sheets older than 2 hours
+  try {
+    for (const f of fs.readdirSync(UPLOADS_DIR)) {
+      const p = path.join(UPLOADS_DIR, f);
+      if (now - fs.statSync(p).mtimeMs > 2 * 60 * 60 * 1000) fs.rmSync(p, { force: true });
+    }
+  } catch (e) {}
+}, 60 * 1000);
+
+// ========================
+// Socket.io
+// ========================
+io.on('connection', (socket) => {
+  const sid = socket.handshake.auth?.sessionId;
+  if (!isValidSessionId(sid)) {
+    socket.emit('status', { status: 'disconnected', message: 'جلسة غير صالحة، أعد تحميل الصفحة' });
+    socket.disconnect(true);
+    return;
+  }
+
+  const s = getSession(sid);
+  socket.join(sid);
+  s.clients++;
+  s.lastSeen = Date.now();
+
+  if (s.status === 'connected' && s.user) {
+    socket.emit('status', { status: 'connected', user: userPayload(s.user) });
+  } else if (s.qr) {
+    QRCode.toDataURL(s.qr, { scale: 8, margin: 1 }).then((url) => {
+      socket.emit('qr', url);
+      socket.emit('status', { status: 'connecting', message: 'امسح رمز QR للاتصال' });
+    });
+  } else {
+    socket.emit('status', { status: s.status, message: 'جاري تهيئة الاتصال...' });
+    if (!s.sock) initWhatsApp(s);
+  }
+
+  if (s.task.isRunning) {
+    socket.emit('removal_progress', {
+      total: s.task.total,
+      processed: s.task.processed,
+      successful: s.task.successful,
+      failed: s.task.failed,
+      remaining: s.task.total - s.task.processed,
+      percentage: Math.round((s.task.processed / Math.max(s.task.total, 1)) * 100)
+    });
+  }
+
+  socket.on('disconnect', () => {
+    s.clients = Math.max(0, s.clients - 1);
+    s.lastSeen = Date.now();
+  });
+
+  socket.on('reconnect_wa', () => {
+    initWhatsApp(s);
+  });
+
+  socket.on('pause_removal', () => {
+    if (s.task.isRunning) {
+      s.task.isPaused = true;
+      emitTo(s, 'removal_log', { type: 'warn', message: '⏸️ تم إيقاف عملية الحذف مؤقتاً بواسطة المستخدم' });
+    }
+  });
+
+  socket.on('resume_removal', () => {
+    if (s.task.isRunning && s.task.isPaused) {
+      s.task.isPaused = false;
+      emitTo(s, 'removal_log', { type: 'info', message: '▶️ تم استئناف عملية الحذف الآمن' });
+    }
+  });
+
+  socket.on('stop_removal', () => {
+    if (s.task.isRunning) {
+      s.task.isStopped = true;
+      emitTo(s, 'removal_log', { type: 'error', message: '🛑 تم إيقاف عملية الحذف كلياً بناءً على طلب المستخدم' });
+    }
+  });
+});
+
+// ========================
+// Helpers
+// ========================
 function normalizePhoneNumber(rawPhone, defaultCountryCode = '20') {
   if (!rawPhone) return null;
   let digits = String(rawPhone).replace(/\D/g, '');
   if (!digits) return null;
 
-  // Handle leading 00
-  if (digits.startsWith('00')) {
-    digits = digits.substring(2);
-  }
+  if (digits.startsWith('00')) digits = digits.substring(2);
 
-  // Handle Egyptian local format (01xxxxxxxxx -> 11 digits)
+  // Egyptian local format (01xxxxxxxxx -> 11 digits)
   if (digits.startsWith('01') && digits.length === 11) {
     digits = '20' + digits.substring(1);
   } else if (digits.startsWith('0') && defaultCountryCode) {
@@ -88,206 +306,78 @@ function normalizePhoneNumber(rawPhone, defaultCountryCode = '20') {
   } else if (digits.length <= 10 && defaultCountryCode) {
     digits = defaultCountryCode + digits;
   }
-
   return digits;
 }
 
-// Initialize WhatsApp connection
-async function initWhatsApp() {
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version, isLatest } = await fetchLatestBaileysVersion();
-    console.log(`[Baileys] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
-
-    sock = makeWASocket({
-      version,
-      logger: pino({ level: 'silent' }),
-      printQRInTerminal: false,
-      auth: state,
-      browser: ['WA Group Manager', 'Chrome', '1.0.0'],
-      syncFullHistory: false
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
-
-      if (qr) {
-        currentQR = qr;
-        connectionStatus = 'connecting';
-        try {
-          const qrDataUrl = await QRCode.toDataURL(qr, { scale: 8, margin: 1 });
-          io.emit('qr', qrDataUrl);
-          io.emit('status', { status: 'connecting', message: 'امسح رمز QR للاتصال' });
-        } catch (err) {
-          console.error('[QR] Error generating QR data URL:', err);
-        }
-      }
-
-      if (connection === 'close') {
-        const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        console.log(`[Connection] Closed. Reason code: ${statusCode}. Reconnecting: ${shouldReconnect}`);
-        
-        connectionStatus = 'disconnected';
-        currentQR = null;
-        currentUser = null;
-        io.emit('status', { status: 'disconnected', message: 'تم قطع الاتصال' });
-
-        if (shouldReconnect) {
-          setTimeout(() => initWhatsApp(), 3000);
-        } else {
-          // Logged out - clear session directory
-          try {
-            fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-          } catch (e) {
-            console.error('[Auth] Error clearing auth dir:', e);
-          }
-          io.emit('status', { status: 'logged_out', message: 'تم تسجيل الخروج من الهاتف' });
-        }
-      } else if (connection === 'open') {
-        connectionStatus = 'connected';
-        currentQR = null;
-        currentUser = sock.user;
-        console.log('[Connection] WhatsApp connected as:', sock.user);
-        io.emit('status', {
-          status: 'connected',
-          user: {
-            id: sock.user.id,
-            name: sock.user.name || sock.user.notify || 'حساب واتساب',
-            phone: sock.user.id.split(':')[0]
-          }
-        });
-      }
-    });
-
-  } catch (err) {
-    console.error('[Baileys] Init error:', err);
-    connectionStatus = 'disconnected';
-    io.emit('status', { status: 'disconnected', message: 'فشل في الاتصال' });
-  }
+// Resolve an uploaded sheet path safely (only files inside the uploads folder)
+function safeUploadPath(p) {
+  if (!p || typeof p !== 'string') return null;
+  const full = path.join(UPLOADS_DIR, path.basename(p));
+  return fs.existsSync(full) ? full : null;
 }
 
-// Start WhatsApp on launch
-initWhatsApp();
-
-// Socket.io Events
-io.on('connection', (socket) => {
-  console.log('[Socket] Client connected:', socket.id);
-
-  // Send current status immediately
-  if (connectionStatus === 'connected' && currentUser) {
-    socket.emit('status', {
-      status: 'connected',
-      user: {
-        id: currentUser.id,
-        name: currentUser.name || currentUser.notify || 'حساب واتساب',
-        phone: currentUser.id.split(':')[0]
-      }
-    });
-  } else if (currentQR) {
-    QRCode.toDataURL(currentQR, { scale: 8, margin: 1 }).then((url) => {
-      socket.emit('qr', url);
-      socket.emit('status', { status: 'connecting', message: 'امسح رمز QR للاتصال' });
-    });
-  } else {
-    socket.emit('status', { status: connectionStatus, message: 'جاري تهيئة الاتصال...' });
+// Attach the caller's session to every /api request
+function requireSession(req, res, next) {
+  const sid = req.get('x-session-id') || req.query.sid;
+  if (!isValidSessionId(sid)) {
+    return res.status(400).json({ success: false, error: 'جلسة غير صالحة، أعد تحميل الصفحة' });
   }
+  req.s = getSession(sid);
+  req.s.lastSeen = Date.now();
+  next();
+}
 
-  // Handle client request to reconnect/regenerate QR
-  socket.on('reconnect_wa', () => {
-    initWhatsApp();
-  });
-
-  // Handle pause/resume/stop removal
-  socket.on('pause_removal', () => {
-    if (activeTask.isRunning) {
-      activeTask.isPaused = true;
-      io.emit('removal_log', { type: 'warn', message: '⏸️ تم إيقاف عملية الحذف مؤقتاً بواسطة المستخدم' });
-    }
-  });
-
-  socket.on('resume_removal', () => {
-    if (activeTask.isRunning && activeTask.isPaused) {
-      activeTask.isPaused = false;
-      io.emit('removal_log', { type: 'info', message: '▶️ تم استئناف عملية الحذف الآمن' });
-    }
-  });
-
-  socket.on('stop_removal', () => {
-    if (activeTask.isRunning) {
-      activeTask.isStopped = true;
-      activeTask.isRunning = false;
-      io.emit('removal_log', { type: 'error', message: '🛑 تم إيقاف عملية الحذف كلياً بناءً على طلب المستخدم' });
-    }
-  });
-});
-
+// ========================
 // API Routes
+// ========================
+app.get('/healthz', (req, res) => res.send('ok'));
 
-// 1. Status endpoint
+app.use('/api', requireSession);
+
 app.get('/api/status', (req, res) => {
-  res.json({
-    connectionStatus,
-    user: currentUser ? {
-      id: currentUser.id,
-      name: currentUser.name || currentUser.notify || 'حساب واتساب',
-      phone: currentUser.id.split(':')[0]
-    } : null
-  });
+  res.json({ connectionStatus: req.s.status, user: userPayload(req.s.user) });
 });
 
-// 2. Logout endpoint
 app.post('/api/logout', async (req, res) => {
+  const s = req.s;
   try {
-    if (sock) {
-      await sock.logout();
+    if (s.sock) {
+      try { await s.sock.logout(); } catch (e) {}
     }
-    fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    connectionStatus = 'disconnected';
-    currentUser = null;
-    currentQR = null;
-    setTimeout(() => initWhatsApp(), 1500);
+    closeSock(s);
+    fs.rmSync(path.join(SESSIONS_DIR, s.id), { recursive: true, force: true });
+    s.status = 'disconnected';
+    s.user = null;
+    s.qr = null;
+    s.groups = [];
+    setTimeout(() => initWhatsApp(s), 1500);
     res.json({ success: true, message: 'تم تسجيل الخروج بنجاح' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 3. Upload & Parse Excel file
 app.post('/api/upload-excel', upload.single('file'), (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'لم يتم اختيار ملف' });
     }
-
-    const filePath = req.file.path;
-    const workbook = xlsx.readFile(filePath);
-    const firstSheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[firstSheetName];
+    const workbook = xlsx.readFile(req.file.path);
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
     const jsonData = xlsx.utils.sheet_to_json(worksheet, { defval: '' });
 
     if (!jsonData || jsonData.length === 0) {
       return res.status(400).json({ success: false, error: 'الملف فارغ أو لا يحتوي على صفوف بيانات' });
     }
 
-    // Get column names
     const columns = Object.keys(jsonData[0]);
-
-    // Guess phone column & name column
-    let detectedPhoneCol = columns.find(c =>
-      /phone|mobile|tel|رقم|موبايل|هاتف|تليفون|جوال/i.test(c)
-    ) || columns[0];
-
-    let detectedNameCol = columns.find(c =>
-      /name|اسم|الاسم|عميل|طالب|عضو/i.test(c)
-    ) || (columns.length > 1 ? columns[1] : columns[0]);
+    const detectedPhoneCol = columns.find(c => /phone|mobile|tel|رقم|موبايل|هاتف|تليفون|جوال/i.test(c)) || columns[0];
+    const detectedNameCol = columns.find(c => /name|اسم|الاسم|عميل|طالب|عضو/i.test(c)) || (columns.length > 1 ? columns[1] : columns[0]);
 
     res.json({
       success: true,
       fileName: req.file.originalname,
-      tempPath: filePath,
+      tempPath: path.basename(req.file.path),
       totalRows: jsonData.length,
       columns,
       detectedPhoneCol,
@@ -300,17 +390,16 @@ app.post('/api/upload-excel', upload.single('file'), (req, res) => {
   }
 });
 
-// 4. Process Excel with selected columns
 app.post('/api/process-excel', (req, res) => {
   try {
     const { tempPath, phoneCol, nameCol, defaultCountryCode } = req.body;
-    if (!tempPath || !fs.existsSync(tempPath)) {
-      return res.status(400).json({ success: false, error: 'مسار الملف غير صالح أو تم حذفه' });
+    const filePath = safeUploadPath(tempPath);
+    if (!filePath) {
+      return res.status(400).json({ success: false, error: 'مسار الملف غير صالح أو تم حذفه، ارفع الملف مرة أخرى' });
     }
 
-    const workbook = xlsx.readFile(tempPath);
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rawData = xlsx.utils.sheet_to_json(sheet, { defval: '' });
+    const workbook = xlsx.readFile(filePath);
+    const rawData = xlsx.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { defval: '' });
 
     const processedList = [];
     const seenPhones = new Set();
@@ -333,26 +422,21 @@ app.post('/api/process-excel', (req, res) => {
       }
     }
 
-    res.json({
-      success: true,
-      totalExtracted: processedList.length,
-      items: processedList
-    });
+    res.json({ success: true, totalExtracted: processedList.length, items: processedList });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 5. Fetch all WhatsApp groups
 app.get('/api/groups', async (req, res) => {
+  const s = req.s;
   try {
-    if (connectionStatus !== 'connected' || !sock) {
+    if (s.status !== 'connected' || !s.sock) {
       return res.status(400).json({ success: false, error: 'واتساب غير متصل حالياً' });
     }
-
+    const sock = s.sock;
     const myPhone = sock.user?.id ? sock.user.id.split('@')[0].split(':')[0] : '';
     const myLid = sock.user?.lid ? sock.user.lid.split('@')[0].split(':')[0] : '';
-    console.log(`[Groups] Fetching all groups. My phone: ${myPhone}, My LID: ${myLid}`);
 
     function isParticipantMe(p) {
       if (!p) return false;
@@ -388,11 +472,10 @@ app.get('/api/groups', async (req, res) => {
         isAdmin: amIAdmin,
         participants: participants.map(p => {
           const rawJid = p.jid || p.id;
-          const phone = rawJid.split('@')[0].split(':')[0];
           return {
             id: p.id,
             jid: rawJid,
-            phone,
+            phone: rawJid.split('@')[0].split(':')[0],
             isMe: isParticipantMe(p),
             isAdmin: p.admin === 'admin' || p.admin === 'superadmin'
           };
@@ -400,15 +483,13 @@ app.get('/api/groups', async (req, res) => {
       });
     }
 
-    // Sort: Admin groups first, then alphabetically
     groupList.sort((a, b) => {
       if (a.isAdmin && !b.isAdmin) return -1;
       if (!a.isAdmin && b.isAdmin) return 1;
       return a.subject.localeCompare(b.subject);
     });
 
-    // Cache groups in memory
-    cachedGroupsList = groupList;
+    s.groups = groupList;
 
     res.json({
       success: true,
@@ -422,18 +503,19 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
-// 6. Match Excel/Custom records with Selected Groups
 app.post('/api/match-members', (req, res) => {
   try {
-    const { targetGroupIds, excelRecords, groupsData } = req.body;
+    const { targetGroupIds, excelRecords } = req.body;
     if (!targetGroupIds || targetGroupIds.length === 0) {
       return res.status(400).json({ success: false, error: 'لم يتم تحديد أي مجموعة' });
     }
 
-    const groupsPool = (groupsData && groupsData.length > 0) ? groupsData : cachedGroupsList;
-    const selectedGroups = groupsPool.filter(g => targetGroupIds.includes(g.id));
+    // Always use this user's own groups from the server (never trust client-sent group data)
+    const selectedGroups = req.s.groups.filter(g => targetGroupIds.includes(g.id));
+    if (selectedGroups.length === 0) {
+      return res.status(400).json({ success: false, error: 'أعد تحميل قائمة الجروبات ثم حاول مرة أخرى' });
+    }
 
-    // If no numbers provided, return all participants from selected groups so user can select directly
     if (!excelRecords || excelRecords.length === 0) {
       const allDirectMembers = [];
       const protectedAdmins = [];
@@ -441,21 +523,9 @@ app.post('/api/match-members', (req, res) => {
       for (const group of selectedGroups) {
         for (const p of group.participants) {
           if (p.isMe) {
-            protectedAdmins.push({
-              name: 'حسابك الشخصي',
-              phone: p.phone,
-              groupId: group.id,
-              groupName: group.subject,
-              reason: 'حسابك الشخصي (محمي)'
-            });
+            protectedAdmins.push({ name: 'حسابك الشخصي', phone: p.phone, groupId: group.id, groupName: group.subject, reason: 'حسابك الشخصي (محمي)' });
           } else if (p.isAdmin) {
-            protectedAdmins.push({
-              name: 'مشرف في الجروب',
-              phone: p.phone,
-              groupId: group.id,
-              groupName: group.subject,
-              reason: 'مشرف في الجروب (محمي)'
-            });
+            protectedAdmins.push({ name: 'مشرف في الجروب', phone: p.phone, groupId: group.id, groupName: group.subject, reason: 'مشرف في الجروب (محمي)' });
           } else {
             allDirectMembers.push({
               excelRow: '-',
@@ -487,60 +557,38 @@ app.post('/api/match-members', (req, res) => {
     const matchesToKick = [];
     const protectedAdmins = [];
     const notFoundInGroups = [];
-
-    // Map phone -> excel record
     const excelMap = new Map();
-    excelRecords.forEach(rec => {
-      excelMap.set(rec.normalizedPhone, rec);
-    });
-
+    excelRecords.forEach(rec => excelMap.set(rec.normalizedPhone, rec));
     const matchedPhonesSet = new Set();
 
     for (const group of selectedGroups) {
       for (const participant of group.participants) {
         const participantPhone = participant.phone;
+        if (!excelMap.has(participantPhone)) continue;
 
-        if (excelMap.has(participantPhone)) {
-          const excelRecord = excelMap.get(participantPhone);
-          matchedPhonesSet.add(participantPhone);
+        const excelRecord = excelMap.get(participantPhone);
+        matchedPhonesSet.add(participantPhone);
 
-          if (participant.isMe) {
-            protectedAdmins.push({
-              name: excelRecord.name + ' (حسابك الشخصي)',
-              phone: participantPhone,
-              groupId: group.id,
-              groupName: group.subject,
-              reason: 'حسابك الشخصي (تم حمايته واستثناؤه تلقائياً)'
-            });
-          } else if (participant.isAdmin) {
-            protectedAdmins.push({
-              name: excelRecord.name,
-              phone: participantPhone,
-              groupId: group.id,
-              groupName: group.subject,
-              reason: 'مشرف في المجموعة (تم حمايته واستثناؤه تلقائياً)'
-            });
-          } else {
-            matchesToKick.push({
-              excelRow: excelRecord.rowNumber,
-              name: excelRecord.name,
-              phone: participantPhone,
-              jid: participant.jid || participant.id,
-              groupId: group.id,
-              groupName: group.subject,
-              selected: true
-            });
-          }
+        if (participant.isMe) {
+          protectedAdmins.push({ name: excelRecord.name + ' (حسابك الشخصي)', phone: participantPhone, groupId: group.id, groupName: group.subject, reason: 'حسابك الشخصي (تم حمايته واستثناؤه تلقائياً)' });
+        } else if (participant.isAdmin) {
+          protectedAdmins.push({ name: excelRecord.name, phone: participantPhone, groupId: group.id, groupName: group.subject, reason: 'مشرف في المجموعة (تم حمايته واستثناؤه تلقائياً)' });
+        } else {
+          matchesToKick.push({
+            excelRow: excelRecord.rowNumber,
+            name: excelRecord.name,
+            phone: participantPhone,
+            jid: participant.jid || participant.id,
+            groupId: group.id,
+            groupName: group.subject,
+            selected: true
+          });
         }
       }
     }
 
-
-    // Identify excel numbers not found in any selected group
     excelRecords.forEach(rec => {
-      if (!matchedPhonesSet.has(rec.normalizedPhone)) {
-        notFoundInGroups.push(rec);
-      }
+      if (!matchedPhonesSet.has(rec.normalizedPhone)) notFoundInGroups.push(rec);
     });
 
     res.json({
@@ -559,153 +607,104 @@ app.post('/api/match-members', (req, res) => {
   }
 });
 
-// 7. Start Bulk Removal
 app.post('/api/start-removal', async (req, res) => {
+  const s = req.s;
   try {
-    const { itemsToRemove, delaySeconds = 4, batchPauseCount = 25 } = req.body;
+    const { itemsToRemove } = req.body;
+    const delaySeconds = Math.max(2, Number(req.body.delaySeconds) || 4);
+    const batchPauseCount = Math.max(1, parseInt(req.body.batchPauseCount, 10) || 25);
 
     if (!itemsToRemove || itemsToRemove.length === 0) {
       return res.status(400).json({ success: false, error: 'لا يوجد أعضاء محددين للحذف' });
     }
-
-    if (activeTask.isRunning) {
+    if (s.task.isRunning) {
       return res.status(400).json({ success: false, error: 'هناك عملية حذف جارية بالفعل' });
     }
-
-    if (connectionStatus !== 'connected' || !sock) {
+    if (s.status !== 'connected' || !s.sock) {
       return res.status(400).json({ success: false, error: 'واتساب غير متصل' });
     }
 
-    // Initialize task
-    activeTask = {
-      isRunning: true,
-      isPaused: false,
-      isStopped: false,
-      total: itemsToRemove.length,
-      processed: 0,
-      successful: 0,
-      failed: 0,
-      results: []
-    };
+    const task = newTaskState();
+    task.isRunning = true;
+    task.total = itemsToRemove.length;
+    s.task = task;
 
     res.json({ success: true, message: 'تم بدء عملية الحذف بنجاح' });
 
-    // Execute in background
     (async () => {
-      io.emit('removal_log', {
-        type: 'info',
-        message: `🚀 بدء عملية الحذف لعدد ${itemsToRemove.length} عضو بفاصل زمني ${delaySeconds} ثوانٍ...`
-      });
+      emitTo(s, 'removal_log', { type: 'info', message: `🚀 بدء عملية الحذف لعدد ${itemsToRemove.length} عضو بفاصل زمني ${delaySeconds} ثوانٍ...` });
 
       for (let i = 0; i < itemsToRemove.length; i++) {
-        // Check if stopped
-        if (activeTask.isStopped) {
-          io.emit('removal_log', { type: 'warn', message: '⏹️ توقفت العملية بالكامل.' });
+        if (task.isStopped) {
+          emitTo(s, 'removal_log', { type: 'warn', message: '⏹️ توقفت العملية بالكامل.' });
           break;
         }
+        while (task.isPaused && !task.isStopped) await sleep(1000);
+        if (task.isStopped) break;
 
-        // Check if paused
-        while (activeTask.isPaused && !activeTask.isStopped) {
+        // Wait for WhatsApp to reconnect if the link dropped mid-task
+        let waited = 0;
+        while ((!s.sock || s.status !== 'connected') && waited < 60 && !task.isStopped) {
+          if (waited === 0) emitTo(s, 'removal_log', { type: 'warn', message: '⚠️ انقطع الاتصال بواتساب، جاري الانتظار لإعادة الاتصال...' });
           await sleep(1000);
+          waited++;
         }
 
         const item = itemsToRemove[i];
-        activeTask.processed++;
+        task.processed++;
 
-        // Batch pause logic to prevent anti-spam trigger
         if (i > 0 && i % batchPauseCount === 0) {
-          io.emit('removal_log', {
-            type: 'warn',
-            message: `🛡️ استراحة حماية مؤقتة لمدة 15 ثانية بعد إتمام دفعة من ${batchPauseCount} عضو...`
-          });
+          emitTo(s, 'removal_log', { type: 'warn', message: `🛡️ استراحة حماية مؤقتة لمدة 15 ثانية بعد إتمام دفعة من ${batchPauseCount} عضو...` });
           await sleep(15000);
         }
 
         try {
           const targetJid = (item.jid && item.jid.includes('@')) ? item.jid : `${item.phone}@s.whatsapp.net`;
-          console.log(`[Removal Action] Removing ${targetJid} from ${item.groupId} (${item.groupName})`);
+          emitTo(s, 'removal_log', { type: 'info', message: `⏳ [${task.processed}/${task.total}] جاري حذف "${item.name}" (${item.phone}) من "${item.groupName}"...` });
 
-          io.emit('removal_log', {
-            type: 'info',
-            message: `⏳ [${activeTask.processed}/${activeTask.total}] جاري حذف "${item.name}" (${item.phone}) من "${item.groupName}"...`
-          });
+          if (!s.sock) throw new Error('واتساب غير متصل');
+          await s.sock.groupParticipantsUpdate(item.groupId, [targetJid], 'remove');
 
-          await sock.groupParticipantsUpdate(item.groupId, [targetJid], 'remove');
-
-          activeTask.successful++;
-          const resultEntry = {
-            ...item,
-            status: 'تم الحذف بنجاح',
-            timestamp: new Date().toLocaleTimeString('ar-EG')
-          };
-          activeTask.results.push(resultEntry);
-
-          io.emit('removal_log', {
-            type: 'success',
-            message: `✅ تم بنجاح حذف "${item.name}" (${item.phone}) من "${item.groupName}".`
-          });
-
+          task.successful++;
+          task.results.push({ ...item, status: 'تم الحذف بنجاح', timestamp: new Date().toLocaleTimeString('ar-EG') });
+          emitTo(s, 'removal_log', { type: 'success', message: `✅ تم بنجاح حذف "${item.name}" (${item.phone}) من "${item.groupName}".` });
         } catch (err) {
-          activeTask.failed++;
-          console.error(`[Removal Failed] ${item.phone}:`, err);
-          const resultEntry = {
-            ...item,
-            status: 'فشل: ' + (err.message || 'خطأ غير معروف'),
-            timestamp: new Date().toLocaleTimeString('ar-EG')
-          };
-          activeTask.results.push(resultEntry);
-
-          io.emit('removal_log', {
-            type: 'error',
-            message: `❌ فشل حذف "${item.name}" (${item.phone}): ${err.message || 'خطأ'}`
-          });
+          task.failed++;
+          task.results.push({ ...item, status: 'فشل: ' + (err.message || 'خطأ غير معروف'), timestamp: new Date().toLocaleTimeString('ar-EG') });
+          emitTo(s, 'removal_log', { type: 'error', message: `❌ فشل حذف "${item.name}" (${item.phone}): ${err.message || 'خطأ'}` });
         }
 
-        // Emit live progress
-        const percentage = Math.round((activeTask.processed / activeTask.total) * 100);
-        io.emit('removal_progress', {
-          total: activeTask.total,
-          processed: activeTask.processed,
-          successful: activeTask.successful,
-          failed: activeTask.failed,
-          remaining: activeTask.total - activeTask.processed,
-          percentage
+        emitTo(s, 'removal_progress', {
+          total: task.total,
+          processed: task.processed,
+          successful: task.successful,
+          failed: task.failed,
+          remaining: task.total - task.processed,
+          percentage: Math.round((task.processed / task.total) * 100)
         });
 
-        // Safe delay with random jitter (delaySeconds + 0.5s to 2.5s jitter)
-        if (i < itemsToRemove.length - 1 && !activeTask.isStopped) {
+        if (i < itemsToRemove.length - 1 && !task.isStopped) {
           const jitterMs = Math.floor(Math.random() * 2000) + 500;
-          const waitTimeMs = (delaySeconds * 1000) + jitterMs;
-          await sleep(waitTimeMs);
+          await sleep(delaySeconds * 1000 + jitterMs);
         }
       }
 
-      activeTask.isRunning = false;
-      io.emit('removal_log', {
-        type: 'success',
-        message: `🎉 اكتملت العملية! نجح: ${activeTask.successful} | فشل: ${activeTask.failed}`
-      });
-      io.emit('removal_completed', {
-        total: activeTask.total,
-        successful: activeTask.successful,
-        failed: activeTask.failed,
-        results: activeTask.results
-      });
+      task.isRunning = false;
+      s.lastSeen = Date.now();
+      emitTo(s, 'removal_log', { type: 'success', message: `🎉 اكتملت العملية! نجح: ${task.successful} | فشل: ${task.failed}` });
+      emitTo(s, 'removal_completed', { total: task.total, successful: task.successful, failed: task.failed, results: task.results });
     })();
-
   } catch (err) {
     console.error('[Start Removal] Error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// 8. Export Results
 app.get('/api/export-results', (req, res) => {
   try {
-    const ws = xlsx.utils.json_to_sheet(activeTask.results);
+    const ws = xlsx.utils.json_to_sheet(req.s.task.results);
     const wb = xlsx.utils.book_new();
     xlsx.utils.book_append_sheet(wb, ws, 'نتائج الحذف');
-
     const buf = xlsx.write(wb, { type: 'buffer', bookType: 'xlsx' });
     res.setHeader('Content-Disposition', 'attachment; filename="removal_results.xlsx"');
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -715,7 +714,6 @@ app.get('/api/export-results', (req, res) => {
   }
 });
 
-// Start Server
 server.listen(PORT, () => {
   console.log(`\n======================================================`);
   console.log(`🚀 خادم تطبيق مدير مجموعات واتساب يعمل بنجاح!`);
